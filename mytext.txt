@@ -1,0 +1,26 @@
+THERAPY_MAP = {
+    "angry": {
+        "visual": "flowing_water",
+        "color": "soft_blue",
+        "audio": ["slow_breathing", "ambient_music"],
+        "duration_sec": 120
+    },
+    "sad": {
+        "visual": "flower_bloom",
+        "color": "warm_light",
+        "audio": ["soft_piano"],
+        "narration": "It's okay. Tomorrow will be better.",
+        "duration_sec": 180
+    },
+    "anxious": {
+        "visual": "slow_particles",
+        "audio": ["heartbeat_regulation"],
+        "breathing_guide": True,
+        "duration_sec": 90
+    },
+    "happy": {
+        "visual": "colorful_sparkles",
+        "audio": ["birds_chirping", "ambient_peace"],
+        "duration_sec": 60
+    }
+}
