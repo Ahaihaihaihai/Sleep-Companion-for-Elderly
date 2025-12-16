@@ -323,9 +323,9 @@ def main():
     # States: LOBBY, RECORDING, RESULT, WEEKLY
     state = "LOBBY"
 
-    btn_record = Button((80, 180, 260, 70), "1. Record")
-    btn_weekly = Button((80, 270, 260, 70), "2. Weekly Report")
-    btn_exit   = Button((80, 360, 260, 70), "3. Exit")
+    btn_record = Button((80, 180, 260, 70), "Record")
+    btn_weekly = Button((80, 270, 260, 70), "Weekly Report")
+    btn_exit   = Button((80, 360, 260, 70), "Exit")
 
     btn_back = Button((80, 470, 160, 55), "Back")
     btn_play = Button((260, 470, 220, 55), "Play Therapy")
@@ -432,7 +432,7 @@ def main():
         screen.fill((18, 18, 22))
 
         if state == "LOBBY":
-            draw_text(screen, "Lobby", 80, 80, font_big)
+            draw_text(screen, "Sleep Companion for Elderly", 80, 80, font_big)
             draw_text(screen, "Pick what you want to do.", 80, 125, font_mid, (200,200,200))
 
             mx, my = pygame.mouse.get_pos()
