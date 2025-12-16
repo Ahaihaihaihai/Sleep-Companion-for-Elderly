@@ -285,9 +285,26 @@ def pipeline_worker(result_q: "queue.Queue[dict]", level_q: "queue.Queue[float]"
             level_q=level_q,
         )
         text = transcribe_whisper(wav_path, model_size="base")
+        # if not text:
+        #     result_q.put({"ok": False, "error": "Empty transcript. Try recording longer / closer mic."})
+        #     return
+        # passive UI
         if not text:
-            result_q.put({"ok": False, "error": "Empty transcript. Try recording longer / closer mic."})
+            # diam = fallback neutral therapy
+            emo = EmotionResult(label="neutral", score=0.0)
+            key, therapy = "neutral", NEUTRAL_FALLBACK
+            entry = {
+                "ts": time.time(),
+                "text": "",
+                "emotion_raw": {"label": "neutral", "score": 0.0},
+                "emotion_key": key,
+                "therapy": therapy,
+                "note": "No speech detected. Using neutral calming therapy.",
+            }
+            append_log(entry)
+            result_q.put({"ok": True, **entry})
             return
+
 
         emo = detect_emotion(text)
         key, therapy = choose_therapy(emo, min_conf=0.60)
@@ -310,6 +327,23 @@ def pipeline_worker(result_q: "queue.Queue[dict]", level_q: "queue.Queue[float]"
             try: os.remove(wav_path)
             except Exception: pass
 
+def start_recording(result_q, level_q, rec_seconds):
+    # bersihin queue biar nggak kebaca hasil lama
+    while not result_q.empty():
+        try: result_q.get_nowait()
+        except Exception: break
+    while not level_q.empty():
+        try: level_q.get_nowait()
+        except Exception: break
+
+    worker = threading.Thread(
+        target=pipeline_worker,
+        args=(result_q, level_q, rec_seconds),
+        daemon=True
+    )
+    worker.start()
+    return worker, time.time()
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((W, H))
@@ -329,6 +363,7 @@ def main():
 
     btn_back = Button((80, 470, 160, 55), "Back")
     btn_play = Button((260, 470, 220, 55), "Play Therapy")
+    btn_retry = Button((500, 470, 220, 55), "Record Again")
 
     # Recording worker comms
     result_q: "queue.Queue[dict]" = queue.Queue()
@@ -358,24 +393,14 @@ def main():
 
                 if state == "LOBBY":
                     if btn_record.hit(pos):
-                        # start recording thread
                         info_msg = ""
                         result_data = None
                         therapy_img = None
-                        while not result_q.empty():
-                            result_q.get_nowait()
-                        while not level_q.empty():
-                            try: level_q.get_nowait()
-                            except Exception: break
 
-                        worker = threading.Thread(
-                            target=pipeline_worker,
-                            args=(result_q, level_q, rec_seconds),
-                            daemon=True
-                        )
-                        worker.start()
-                        rec_start = time.time()
+                        worker, rec_start = start_recording(result_q, level_q, rec_seconds)
                         state = "RECORDING"
+                        pygame.display.set_caption("Emotion Therapy - Recording")
+
 
                     elif btn_weekly.hit(pos):
                         weekly_data = load_weekly_summary(days=7)
@@ -397,12 +422,20 @@ def main():
                             speak_narration_tts(narration)
                         audio_list = therapy.get("audio", [])
                         duration = int(therapy.get("duration_sec", 60))
-                        # play in another thread so UI doesn't freeze
                         threading.Thread(
                             target=play_audio_sequence,
                             args=(audio_list, duration),
                             daemon=True
                         ).start()
+
+                    if btn_retry.hit(pos):
+                        info_msg = ""
+                        result_data = None
+                        therapy_img = None
+
+                        worker, rec_start = start_recording(result_q, level_q, rec_seconds)
+                        state = "RECORDING"
+                        pygame.display.set_caption("Emotion Therapy – Recording")
 
         # Pull latest mic level
         try:
@@ -424,7 +457,7 @@ def main():
                     therapy = msg.get("therapy", {})
                     therapy_img = load_image_surface(therapy.get("visual", ""))
                 state = "RESULT"
-                pygame.display.set_caption("Emotion Therapy – Result")
+                pygame.display.set_caption("Emotion Therapy - Result")
             except queue.Empty:
                 pass
 
@@ -465,6 +498,7 @@ def main():
         
             btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()))
             btn_play.draw(screen, font_mid, btn_play.hit(pygame.mouse.get_pos()))
+            btn_retry.draw(screen, font_mid, btn_retry.hit(pygame.mouse.get_pos()))
         
             if not result_data or not result_data.get("ok"):
                 draw_text(screen, info_msg or "No result.", 80, 130, font_mid, (255,170,170))
