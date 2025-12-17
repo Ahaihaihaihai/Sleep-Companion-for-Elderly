@@ -376,6 +376,75 @@ def load_background(path: str, size):
         return pygame.transform.smoothscale(img, size)
     except Exception:
         return None
+def wrap_text_lines(font, text: str, max_width: int):
+    words = text.split()
+    lines = []
+    line = ""
+    for w in words:
+        test = (line + " " + w).strip()
+        if font.size(test)[0] <= max_width:
+            line = test
+        else:
+            if line:
+                lines.append(line)
+            line = w
+    if line:
+        lines.append(line)
+    return lines
+
+def draw_lobby_panel(screen, x, y, w, h, font_big, font_mid, font_small,
+                     btn_record, btn_weekly, btn_exit):
+    # panel surface (semua isi lobby digambar di sini biar gak keluar2)
+    panel = pygame.Surface((w, h), pygame.SRCALPHA)
+
+    # background rounded
+    pygame.draw.rect(panel, (255, 255, 255, 185), (0, 0, w, h), border_radius=22)
+    # border rounded
+    pygame.draw.rect(panel, (40, 40, 40, 220), (0, 0, w, h), 2, border_radius=22)
+
+    pad = 28
+    max_text_w = w - pad * 2
+
+    # ---- Title wrap (biar gak kepotong) ----
+    title = "Sleep Companion for Elderly"
+    title_lines = wrap_text_lines(font_big, title, max_text_w)
+
+    ty = 22
+    for ln in title_lines[:2]:  # max 2 baris biar gak kebanyakan
+        panel.blit(font_big.render(ln, True, (25, 25, 25)), (pad, ty))
+        ty += font_big.get_height() + 2
+
+    # subtitle
+    subtitle = "Pick what you want to do."
+    panel.blit(font_mid.render(subtitle, True, (55, 55, 55)), (pad, ty + 4))
+
+    # ---- Buttons (gambar di panel, bukan di screen) ----
+    # biar hit-test tetep bener, kita tetep pakai rect global di main
+    # tapi rendernya kita offset ke panel coords
+    mx, my = pygame.mouse.get_pos()
+    # posisi global tombol -> ubah jadi lokal panel
+    def draw_btn_on_panel(btn, label_font, theme="light"):
+        hovered = btn.hit((mx, my))
+        # render tombol ke surface sementara menggunakan method Button.draw (yang butuh screen)
+        # trik: gambar ke panel dengan offset
+        # -> kita bikin wrapper: set temp rect local, gambar, balikin lagi
+        old = btn.rect.copy()
+        btn.rect.x = old.x - x
+        btn.rect.y = old.y - y
+        btn.draw(panel, label_font, hovered, theme=theme)
+        btn.rect = old
+
+    draw_btn_on_panel(btn_record, font_mid, theme="light")
+    draw_btn_on_panel(btn_weekly, font_mid, theme="light")
+    draw_btn_on_panel(btn_exit, font_mid, theme="light")
+
+    # tip
+    tip = "Tip: Use headphones to avoid feedback."
+    panel.blit(font_small.render(tip, True, (70, 70, 70)), (pad, h - 32))
+
+    # finally blit panel to screen
+    screen.blit(panel, (x, y))
+
 
 def main():
     pygame.init()
@@ -392,9 +461,9 @@ def main():
     state = "LOBBY"  # LOBBY, RECORDING, PROCESSING, RESULT, WEEKLY
 
     # Lobby buttons
-    btn_record = Button((90, 200, 260, 70), "Record")
-    btn_weekly = Button((90, 290, 260, 70), "Weekly Report")
-    btn_exit = Button((90, 380, 260, 70), "Exit")
+    btn_record = Button((90, 190, 320, 70), "Record")
+    btn_weekly = Button((90, 285, 320, 70), "Weekly Report")
+    btn_exit   = Button((90, 380, 320, 70), "Exit")
 
     # Common buttons
     btn_back = Button((80, 500, 160, 55), "Back")
@@ -550,17 +619,17 @@ def main():
 
         # -------- Draw screens --------
         if state == "LOBBY":
-            draw_glass_panel(screen, pygame.Rect(55, 60, 430, 430), alpha=175)
+            # panel lebih lebar dikit biar judul lega
+            panel_x, panel_y = 55, 55
+            panel_w, panel_h = 470, 450
 
-            draw_text(screen, "Sleep Companion for Elderly", 90, 95, font_big, (30, 30, 30))
-            draw_text(screen, "Pick what you want to do.", 90, 140, font_mid, (60, 60, 60))
+            draw_lobby_panel(
+                screen,
+                panel_x, panel_y, panel_w, panel_h,
+                font_big, font_mid, font_small,
+                btn_record, btn_weekly, btn_exit
+            )
 
-            mx, my = pygame.mouse.get_pos()
-            btn_record.draw(screen, font_mid, btn_record.hit((mx, my)), theme="light")
-            btn_weekly.draw(screen, font_mid, btn_weekly.hit((mx, my)), theme="light")
-            btn_exit.draw(screen, font_mid, btn_exit.hit((mx, my)), theme="light")
-
-            draw_text(screen, "Tip: Use headphones to avoid feedback.", 90, 470, font_small, (60, 60, 60))
 
         elif state == "RECORDING":
             draw_glass_panel(screen, pygame.Rect(55, 60, 870, 430), alpha=165)
