@@ -57,7 +57,7 @@ NEUTRAL_FALLBACK = {
     "duration_sec": 60,
 }
 
-LOG_PATH = "session_logs.jsonl"
+LOG_PATH = "session_logs.jsonl"  # weekly report source
 
 # ---------------- Types ----------------
 @dataclass
@@ -91,72 +91,79 @@ def choose_therapy(emotion: EmotionResult, min_conf: float = 0.60) -> Tuple[str,
         return "neutral", NEUTRAL_FALLBACK
     return key, THERAPY_MAP.get(key, NEUTRAL_FALLBACK)
 
-# ---------------- Core pipeline ----------------
-def record_wav_to_temp_with_meter(
-    seconds: int = 6,
-    samplerate: int = 16000,
-    level_q=None,
-    device=None,
-):
-    import numpy as np
-    import sounddevice as sd
-    from scipy.io.wavfile import write as wav_write
+# ---------------- Recording: unlimited until Stop ----------------
+class LiveRecorder:
+    def __init__(self, samplerate=16000, device=None, blocksize=1024):
+        self.samplerate = samplerate
+        self.device = device
+        self.blocksize = blocksize
+        self.stream = None
+        self.frames = []  # list[np.ndarray] float32
+        self.level = 0.0
+        self.is_recording = False
 
-    frames_total = int(seconds * samplerate)
-    audio = np.zeros((frames_total, 1), dtype=np.float32)
-    idx = 0
+    def start(self):
+        import numpy as np
+        import sounddevice as sd
 
-    if level_q is None:
-        import queue as _q
-        level_q = _q.Queue()
+        self.frames = []
+        self.level = 0.0
+        self.is_recording = True
 
-    def callback(indata, frames, time_info, status):
-        nonlocal idx
-        if status:
-            pass
+        def callback(indata, frames, time_info, status):
+            if not self.is_recording:
+                raise sd.CallbackStop()
 
-        take = min(frames, frames_total - idx)
-        if take <= 0:
-            raise sd.CallbackStop()
+            x = indata[:, 0].copy()
+            self.frames.append(x)
 
-        audio[idx:idx + take, 0] = indata[:take, 0]
-        idx += take
+            rms = float(np.sqrt(np.mean(x * x))) if len(x) else 0.0
+            self.level = rms
 
-        x = indata[:take, 0]
-        rms = float((x * x).mean() ** 0.5) if take > 0 else 0.0
-        try:
-            level_q.put_nowait(rms)
-        except Exception:
-            pass
+        self.stream = sd.InputStream(
+            samplerate=self.samplerate,
+            channels=1,
+            dtype="float32",
+            blocksize=self.blocksize,
+            callback=callback,
+            device=self.device,
+        )
+        self.stream.start()
 
-        if idx >= frames_total:
-            raise sd.CallbackStop()
+    def stop_to_wav(self) -> str:
+        import numpy as np
+        from scipy.io.wavfile import write as wav_write
 
-    with sd.InputStream(
-        samplerate=samplerate,
-        channels=1,
-        dtype="float32",
-        callback=callback,
-        blocksize=1024,
-        device=device,
-    ):
-        sd.sleep(int(seconds * 1000) + 300)
+        if self.stream is not None:
+            self.is_recording = False
+            try:
+                self.stream.stop()
+            except Exception:
+                pass
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
 
-    # float32 -> int16
-    audio_i16 = np.clip(audio, -1.0, 1.0)
-    audio_i16 = (audio_i16 * 32767).astype("int16")
+        if not self.frames:
+            return ""
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    tmp.close()
-    wav_write(tmp.name, samplerate, audio_i16)
+        audio = np.concatenate(self.frames, axis=0)
+        audio = np.clip(audio, -1.0, 1.0)
+        audio_i16 = (audio * 32767).astype(np.int16)
 
-    # debug (hapus kalau udah aman)
-    peak = float(abs(audio_i16).max() / 32767.0) if len(audio_i16) else 0.0
-    rms_final = float((((audio_i16 / 32767.0) ** 2).mean()) ** 0.5) if len(audio_i16) else 0.0
-    print(f"[DEBUG AUDIO] peak={peak:.3f} rms={rms_final:.4f}")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        tmp.close()
+        wav_write(tmp.name, self.samplerate, audio_i16)
 
-    return tmp.name
+        peak = float(np.max(np.abs(audio_i16)) / 32767.0) if len(audio_i16) else 0.0
+        rms_final = float(np.sqrt(np.mean((audio_i16 / 32767.0) ** 2))) if len(audio_i16) else 0.0
+        print(f"[DEBUG AUDIO] peak={peak:.3f} rms={rms_final:.4f} len_sec={len(audio_i16)/self.samplerate:.2f}")
 
+        return tmp.name
+
+# ---------------- STT / Emotion / Output ----------------
 def transcribe_whisper(audio_path: str, model_size: str = "base") -> str:
     import whisper
     model = whisper.load_model(model_size)
@@ -229,60 +236,16 @@ def load_weekly_summary(days: int = 7) -> dict:
                 continue
     return {"total": total, "counts": counts}
 
-# ---------------- Pygame UI ----------------
-import pygame
-
-W, H = 980, 560
-
-def draw_text(screen, text, x, y, font, color=(230,230,230)):
-    surf = font.render(text, True, color)
-    screen.blit(surf, (x, y))
-
-class Button:
-    def __init__(self, rect, label):
-        self.rect = pygame.Rect(rect)
-        self.label = label
-
-    def draw(self, screen, font, hovered=False):
-        border = (180,180,180)
-        fill = (60,60,60) if not hovered else (90,90,90)
-        pygame.draw.rect(screen, fill, self.rect, border_radius=12)
-        pygame.draw.rect(screen, border, self.rect, 2, border_radius=12)
-
-        txt = font.render(self.label, True, (240,240,240))
-        txtr = txt.get_rect(center=self.rect.center)
-        screen.blit(txt, txtr)
-
-    def hit(self, pos):
-        return self.rect.collidepoint(pos)
-
-def load_image_surface(path: str, max_size=(320, 260)) -> Optional[pygame.Surface]:
-    if not ensure_file(path):
-        return None
+# Worker: process a wav file (runs in thread)
+def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
     try:
-        img = pygame.image.load(path).convert_alpha()
-        iw, ih = img.get_size()
-        mw, mh = max_size
-        scale = min(mw/iw, mh/ih, 1.0)
-        if scale < 1.0:
-            img = pygame.transform.smoothscale(img, (int(iw*scale), int(ih*scale)))
-        return img
-    except Exception:
-        return None
+        if not wav_path or not os.path.exists(wav_path):
+            result_q.put({"ok": False, "error": "No audio recorded."})
+            return
 
-def pipeline_worker(result_q: "queue.Queue[dict]", level_q: "queue.Queue[float]", rec_seconds=6):
-    wav_path = None
-    try:
-        wav_path = record_wav_to_temp_with_meter(
-            seconds=rec_seconds,
-            samplerate=16000,
-            level_q=level_q,
-        )
         text = transcribe_whisper(wav_path, model_size="base")
-
         if not text:
-            # kamu bisa pilih: error atau fallback neutral
-            result_q.put({"ok": False, "error": "Empty transcript. Try recording longer / closer mic."})
+            result_q.put({"ok": False, "error": "Empty transcript. Try speaking louder / closer mic."})
             return
 
         emo = detect_emotion(text)
@@ -300,28 +263,53 @@ def pipeline_worker(result_q: "queue.Queue[dict]", level_q: "queue.Queue[float]"
 
     except Exception as e:
         result_q.put({"ok": False, "error": str(e)})
+
     finally:
-        if wav_path and os.path.exists(wav_path):
-            try:
-                os.remove(wav_path)
-            except Exception:
-                pass
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
 
-def start_recording(result_q, level_q, rec_seconds):
-    while not result_q.empty():
-        try: result_q.get_nowait()
-        except Exception: break
-    while not level_q.empty():
-        try: level_q.get_nowait()
-        except Exception: break
+# ---------------- Pygame UI ----------------
+import pygame
 
-    worker = threading.Thread(
-        target=pipeline_worker,
-        args=(result_q, level_q, rec_seconds),
-        daemon=True
-    )
-    worker.start()
-    return worker, time.time()
+W, H = 980, 560
+
+def draw_text(screen, text, x, y, font, color=(230,230,230)):
+    surf = font.render(text, True, color)
+    screen.blit(surf, (x, y))
+
+class Button:
+    def __init__(self, rect, label):
+        self.rect = pygame.Rect(rect)
+        self.label = label
+
+    def draw(self, screen, font, hovered=False):
+        border = (180, 180, 180)
+        fill = (60, 60, 60) if not hovered else (90, 90, 90)
+        pygame.draw.rect(screen, fill, self.rect, border_radius=12)
+        pygame.draw.rect(screen, border, self.rect, 2, border_radius=12)
+
+        txt = font.render(self.label, True, (240, 240, 240))
+        txtr = txt.get_rect(center=self.rect.center)
+        screen.blit(txt, txtr)
+
+    def hit(self, pos):
+        return self.rect.collidepoint(pos)
+
+def load_image_surface(path: str, max_size=(320, 260)) -> Optional[pygame.Surface]:
+    if not ensure_file(path):
+        return None
+    try:
+        img = pygame.image.load(path).convert_alpha()
+        iw, ih = img.get_size()
+        mw, mh = max_size
+        scale = min(mw / iw, mh / ih, 1.0)
+        if scale < 1.0:
+            img = pygame.transform.smoothscale(img, (int(iw * scale), int(ih * scale)))
+        return img
+    except Exception:
+        return None
 
 def main():
     pygame.init()
@@ -333,24 +321,31 @@ def main():
     font_mid = pygame.font.SysFont(None, 30)
     font_small = pygame.font.SysFont(None, 22)
 
-    state = "LOBBY"
+    # States
+    state = "LOBBY"  # LOBBY, RECORDING, PROCESSING, RESULT, WEEKLY
 
+    # Lobby buttons
     btn_record = Button((80, 180, 260, 70), "Record")
     btn_weekly = Button((80, 270, 260, 70), "Weekly Report")
-    btn_exit   = Button((80, 360, 260, 70), "Exit")
+    btn_exit = Button((80, 360, 260, 70), "Exit")
 
-    btn_back  = Button((80, 500, 160, 55), "Back")
-    btn_play  = Button((260, 500, 220, 55), "Play Therapy")
+    # Common buttons
+    btn_back = Button((80, 500, 160, 55), "Back")
+
+    # Result buttons
+    btn_play = Button((260, 500, 220, 55), "Play Therapy")
     btn_retry = Button((500, 500, 220, 55), "Record Again")
 
+    # Recording buttons
+    btn_stop = Button((80, 500, 220, 55), "Stop Recording")
+    btn_back_rec = Button((320, 500, 160, 55), "Back")
+
+    # Queues & recorder
     result_q: "queue.Queue[dict]" = queue.Queue()
-    level_q: "queue.Queue[float]" = queue.Queue(maxsize=10)
-    worker: Optional[threading.Thread] = None
+    recorder = LiveRecorder(samplerate=16000, device=None)
 
-    level = 0.0
+    # UI data
     rec_start = 0.0
-    rec_seconds = 6
-
     result_data: Optional[dict] = None
     therapy_img: Optional[pygame.Surface] = None
     weekly_data: Optional[dict] = None
@@ -372,7 +367,16 @@ def main():
                         info_msg = ""
                         result_data = None
                         therapy_img = None
-                        worker, rec_start = start_recording(result_q, level_q, rec_seconds)
+
+                        try:
+                            recorder.start()
+                        except Exception as e:
+                            info_msg = f"Error starting mic: {e}"
+                            state = "RESULT"
+                            pygame.display.set_caption("Emotion Therapy – Result")
+                            continue
+
+                        rec_start = time.time()
                         state = "RECORDING"
                         pygame.display.set_caption("Emotion Therapy – Recording")
 
@@ -383,42 +387,79 @@ def main():
                     elif btn_exit.hit(pos):
                         running = False
 
-                elif state in ("RECORDING", "RESULT", "WEEKLY"):
-                    if btn_back.hit(pos):
-                        pygame.display.set_caption("Emotion Therapy – Lobby")
-                        state = "LOBBY"
+                elif state == "RECORDING":
+                    if btn_stop.hit(pos):
+                        wav_path = recorder.stop_to_wav()
 
-                if state == "RESULT":
+                        while not result_q.empty():
+                            try: result_q.get_nowait()
+                            except Exception: break
+
+                        threading.Thread(
+                            target=process_wav_worker,
+                            args=(result_q, wav_path),
+                            daemon=True
+                        ).start()
+
+                        state = "PROCESSING"
+                        pygame.display.set_caption("Emotion Therapy – Processing")
+
+                    elif btn_back_rec.hit(pos):
+                        try:
+                            _ = recorder.stop_to_wav()
+                            # discard file (optional)
+                        except Exception:
+                            pass
+                        state = "LOBBY"
+                        pygame.display.set_caption("Emotion Therapy – Lobby")
+
+                elif state == "RESULT":
+                    if btn_back.hit(pos):
+                        state = "LOBBY"
+                        pygame.display.set_caption("Emotion Therapy – Lobby")
+
+                    if btn_retry.hit(pos):
+                        info_msg = ""
+                        result_data = None
+                        therapy_img = None
+
+                        try:
+                            recorder.start()
+                        except Exception as e:
+                            info_msg = f"Error starting mic: {e}"
+                            continue
+
+                        rec_start = time.time()
+                        state = "RECORDING"
+                        pygame.display.set_caption("Emotion Therapy – Recording")
+
                     if btn_play.hit(pos) and result_data and result_data.get("ok"):
                         therapy = result_data.get("therapy", {})
                         narration = therapy.get("narration_text")
                         if narration:
                             speak_narration_tts(narration)
+
                         audio_list = therapy.get("audio", [])
                         duration = int(therapy.get("duration_sec", 60))
+
                         threading.Thread(
                             target=play_audio_sequence,
                             args=(audio_list, duration),
                             daemon=True
                         ).start()
 
-                    if btn_retry.hit(pos):
-                        info_msg = ""
-                        result_data = None
-                        therapy_img = None
-                        worker, rec_start = start_recording(result_q, level_q, rec_seconds)
-                        state = "RECORDING"
-                        pygame.display.set_caption("Emotion Therapy – Recording")
+                elif state == "WEEKLY":
+                    if btn_back.hit(pos):
+                        state = "LOBBY"
+                        pygame.display.set_caption("Emotion Therapy – Lobby")
 
-        # pull mic level
-        try:
-            while True:
-                level = level_q.get_nowait()
-        except queue.Empty:
-            pass
+                elif state == "PROCESSING":
+                    if btn_back.hit(pos):
+                        state = "LOBBY"
+                        pygame.display.set_caption("Emotion Therapy – Lobby")
 
-        # when recording, check result
-        if state == "RECORDING":
+        # Pull result when processing
+        if state == "PROCESSING":
             try:
                 msg = result_q.get_nowait()
                 if not msg.get("ok"):
@@ -439,28 +480,37 @@ def main():
 
         if state == "LOBBY":
             draw_text(screen, "Sleep Companion for Elderly", 80, 80, font_big)
-            draw_text(screen, "Pick what you want to do.", 80, 125, font_mid, (200,200,200))
+            draw_text(screen, "Pick what you want to do.", 80, 125, font_mid, (200, 200, 200))
 
             mx, my = pygame.mouse.get_pos()
-            btn_record.draw(screen, font_mid, btn_record.hit((mx,my)))
-            btn_weekly.draw(screen, font_mid, btn_weekly.hit((mx,my)))
-            btn_exit.draw(screen, font_mid, btn_exit.hit((mx,my)))
+            btn_record.draw(screen, font_mid, btn_record.hit((mx, my)))
+            btn_weekly.draw(screen, font_mid, btn_weekly.hit((mx, my)))
+            btn_exit.draw(screen, font_mid, btn_exit.hit((mx, my)))
 
-            draw_text(screen, "Tip: Use headphones to avoid feedback.", 80, 480, font_small, (170,170,170))
+            draw_text(screen, "Tip: Use headphones to avoid feedback.", 80, 480, font_small, (170, 170, 170))
 
         elif state == "RECORDING":
             draw_text(screen, "Recording…", 80, 70, font_big)
             elapsed = time.time() - rec_start
-            remain = max(0.0, rec_seconds - elapsed)
-            draw_text(screen, f"Speak freely. Time left: {remain:.1f}s", 80, 120, font_mid, (200,200,200))
+            draw_text(screen, f"Recording time: {elapsed:.1f}s (press Stop when done)", 80, 120, font_mid, (200, 200, 200))
 
+            # mic level bar from recorder.level
+            level = recorder.level
             bar_x, bar_y, bar_w, bar_h = 80, 200, 520, 26
-            pygame.draw.rect(screen, (50,50,55), (bar_x, bar_y, bar_w, bar_h), border_radius=10)
+            pygame.draw.rect(screen, (50, 50, 55), (bar_x, bar_y, bar_w, bar_h), border_radius=10)
             fill_w = int(bar_w * min(max(level * 2.2, 0.0), 1.0))
-            pygame.draw.rect(screen, (200,200,200), (bar_x, bar_y, fill_w, bar_h), border_radius=10)
-            pygame.draw.rect(screen, (120,120,120), (bar_x, bar_y, bar_w, bar_h), 2, border_radius=10)
-            draw_text(screen, "Mic level", 80, 235, font_small, (170,170,170))
+            pygame.draw.rect(screen, (200, 200, 200), (bar_x, bar_y, fill_w, bar_h), border_radius=10)
+            pygame.draw.rect(screen, (120, 120, 120), (bar_x, bar_y, bar_w, bar_h), 2, border_radius=10)
+            draw_text(screen, "Mic level", 80, 235, font_small, (170, 170, 170))
 
+            btn_stop.draw(screen, font_mid, btn_stop.hit(pygame.mouse.get_pos()))
+            btn_back_rec.draw(screen, font_mid, btn_back_rec.hit(pygame.mouse.get_pos()))
+
+        elif state == "PROCESSING":
+            draw_text(screen, "Processing…", 80, 70, font_big)
+            draw_text(screen, "Transcribing + detecting emotion. Please wait.", 80, 120, font_mid, (200, 200, 200))
+            dots = int((time.time() * 2) % 4)
+            draw_text(screen, "." * dots, 520, 120, font_mid, (200, 200, 200))
             btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()))
 
         elif state == "RESULT":
@@ -471,30 +521,30 @@ def main():
             btn_retry.draw(screen, font_mid, btn_retry.hit(pygame.mouse.get_pos()))
 
             if not result_data or not result_data.get("ok"):
-                draw_text(screen, info_msg or "No result.", 80, 130, font_mid, (255,170,170))
+                draw_text(screen, info_msg or "No result.", 80, 130, font_mid, (255, 170, 170))
             else:
                 text = result_data["text"]
                 emo_raw = result_data["emotion_raw"]
                 emo_key = result_data["emotion_key"]
                 therapy = result_data["therapy"]
 
-                # --- 2-column layout ---
+                # 2-column layout
                 left_x = 80
                 left_w = 480
                 right_x = left_x + left_w + 30
 
-                # emotion line
                 draw_text(
                     screen,
                     f"Detected Emotion: {emo_key.upper()}  (raw={emo_raw['label']}, score={emo_raw['score']:.2f})",
-                    left_x, 120, font_small, (200,200,200)
+                    left_x, 120, font_small, (200, 200, 200)
                 )
 
                 # transcript box (left)
                 draw_text(screen, "Your recorded message:", left_x, 150, font_mid)
+
                 box = pygame.Rect(left_x, 185, left_w, 110)
-                pygame.draw.rect(screen, (30,30,34), box, border_radius=14)
-                pygame.draw.rect(screen, (90,90,100), box, 2, border_radius=14)
+                pygame.draw.rect(screen, (30, 30, 34), box, border_radius=14)
+                pygame.draw.rect(screen, (90, 90, 100), box, 2, border_radius=14)
 
                 words = text.split()
                 lines, line = [], ""
@@ -515,13 +565,13 @@ def main():
 
                 # therapy text (left)
                 draw_text(screen, "Selected Therapy:", left_x, 320, font_mid)
-                draw_text(screen, therapy.get("title", "Therapy"), left_x, 355, font_mid, (220,220,220))
-                draw_text(screen, therapy.get("description", ""), left_x, 385, font_small, (180,180,180))
+                draw_text(screen, therapy.get("title", "Therapy"), left_x, 355, font_mid, (220, 220, 220))
+                draw_text(screen, therapy.get("description", ""), left_x, 385, font_small, (180, 180, 180))
 
                 narration = therapy.get("narration_text")
                 if narration:
                     draw_text(screen, "Therapy guidance:", left_x, 420, font_mid)
-                    draw_text(screen, f"“{narration}”", left_x, 450, font_small, (170,170,170))
+                    draw_text(screen, f"“{narration}”", left_x, 450, font_small, (170, 170, 170))
 
                 # image (right)
                 if therapy_img:
@@ -537,17 +587,17 @@ def main():
             total = weekly_data.get("total", 0)
             counts = weekly_data.get("counts", {})
 
-            draw_text(screen, f"Total sessions: {total}", 80, 130, font_mid, (200,200,200))
+            draw_text(screen, f"Total sessions: {total}", 80, 130, font_mid, (200, 200, 200))
 
             y = 190
             if total == 0:
-                draw_text(screen, "No logs yet. Do a Record session first.", 80, y, font_mid, (180,180,180))
+                draw_text(screen, "No logs yet. Do a Record session first.", 80, y, font_mid, (180, 180, 180))
             else:
                 for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
-                    draw_text(screen, f"- {k}: {v}", 80, y, font_mid, (230,230,230))
+                    draw_text(screen, f"- {k}: {v}", 80, y, font_mid, (230, 230, 230))
                     y += 36
 
-            draw_text(screen, f"Log file: {LOG_PATH}", 80, 520, font_small, (150,150,150))
+            draw_text(screen, f"Log file: {LOG_PATH}", 80, 520, font_small, (150, 150, 150))
 
         pygame.display.flip()
 
