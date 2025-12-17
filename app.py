@@ -222,41 +222,6 @@ def play_video_vlc(video_path: str, duration_sec: int):
         pass
 
 
-# Optional thumbnail from video (first frame)
-def load_video_thumbnail_surface(video_path: str, max_size=(320, 260)):
-    """
-    Optional: requires opencv-python. If not installed or fails -> None.
-    """
-    try:
-        import cv2
-        import numpy as np
-        import pygame
-    except Exception:
-        return None
-
-    if not ensure_file(video_path):
-        return None
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return None
-    ok, frame = cap.read()
-    cap.release()
-    if not ok or frame is None:
-        return None
-
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    h, w = frame.shape[:2]
-
-    mw, mh = max_size
-    scale = min(mw / w, mh / h, 1.0)
-    nw, nh = int(w * scale), int(h * scale)
-
-    frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
-    frame = np.transpose(frame, (1, 0, 2))
-    surf = pygame.surfarray.make_surface(frame)
-    return surf
-
 # ---------------- Logs / Weekly ----------------
 def append_log(entry: dict) -> None:
     try:
@@ -619,7 +584,6 @@ def main():
                 else:
                     result_data = msg
                     therapy = msg.get("therapy", {})
-                    therapy_thumb = load_video_thumbnail_surface(therapy.get("video", ""), max_size=(320, 260))
                 state = "RESULT"
                 pygame.display.set_caption("Emotion Therapy - Result")
             except queue.Empty:
@@ -718,18 +682,8 @@ def main():
                     draw_text(screen, "Therapy guidance:", left_x, 430, font_mid, (30, 30, 30))
                     draw_text(screen, f"“{narration}”", left_x, 460, font_small, (55, 55, 55))
 
-                # Video thumbnail preview (optional)
-                preview_box = pygame.Rect(right_x, 205, 320, 260)
-                pygame.draw.rect(screen, (255, 255, 255), preview_box, border_radius=14)
-                pygame.draw.rect(screen, (60, 60, 60), preview_box, 2, border_radius=14)
 
-                if therapy_thumb:
-                    tw, th = therapy_thumb.get_size()
-                    px = right_x + (preview_box.w - tw) // 2
-                    py = 205 + (preview_box.h - th) // 2
-                    screen.blit(therapy_thumb, (px, py))
-                else:
-                    draw_text(screen, "Video preview", right_x + 85, 325, font_small, (80, 80, 80))
+
 
         elif state == "WEEKLY":
             draw_glass_panel(screen, pygame.Rect(55, 60, 870, 430), alpha=165)
