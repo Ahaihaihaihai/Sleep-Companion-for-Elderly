@@ -8,43 +8,30 @@ THERAPY_MAP = {
     "angry": {
         "title": "Calming Water Therapy",
         "description": "Designed to cool down intense emotions and slow your breathing.",
-        "visual": "assets/images/flowing_water.png",
-        "audio": [
-            "assets/audio/breathing.wav",
-            "assets/audio/ambient_water.wav",
-        ],
+        "video": "assets/angry_therapy.mp4",
         "narration_text": "Let's slow things down. Breathe in… and out.",
-        "duration_sec": 90,
+        "duration_sec": 72,
     },
     "sad": {
         "title": "Gentle Bloom Therapy",
         "description": "A soft emotional support session to help you feel less alone.",
-        "visual": "assets/images/flower_bloom.png",
-        "audio": ["assets/audio/soft_piano.wav"],
+        "video": "assets/sad_therapy.mp4",
         "narration_text": "It's okay to feel this way. You're not alone.",
-        "duration_sec": 120,
+        "duration_sec": 73,
     },
     "anxious": {
         "title": "Breathing & Heartbeat Regulation",
         "description": "Helps reduce anxiety by stabilizing breath and heart rhythm.",
-        "visual": "assets/images/slow_particles.png",
-        "audio": [
-            "assets/audio/heartbeat_regulation.wav",
-            "assets/audio/breathing.wav",
-        ],
+        "video": "assets/anxious_therapy.mp4",
         "narration_text": "Let's breathe slowly together. Follow the rhythm.",
-        "duration_sec": 60,
+        "duration_sec": 72,
     },
     "happy": {
         "title": "Positive Reinforcement Therapy",
         "description": "Keeps your positive mood grounded and relaxed.",
-        "visual": "assets/images/colorful_sparkles.png",
-        "audio": [
-            "assets/audio/birds.wav",
-            "assets/audio/peaceful_ambient.wav",
-        ],
+        "video": "assets/happy_therapy.mp4",
         "narration_text": "Enjoy this peaceful moment.",
-        "duration_sec": 45,
+        "duration_sec": 73,
     },
 }
 
@@ -195,23 +182,77 @@ def speak_narration_tts(text: str) -> None:
     except Exception:
         pass
 
-def play_audio_sequence(audio_paths, max_duration_sec: int = 60) -> None:
+
+def play_therapy_video(screen, video_path: str, duration_sec: int = 60, area: Optional[pygame.Rect] = None):
+    """
+    Play MP4 video inside pygame window using OpenCV frames.
+    Press ESC to stop early.
+    """
+    import cv2
+    import numpy as np
     import pygame
-    pygame.mixer.init()
+    import time
+
+    if not ensure_file(video_path):
+        return
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 1:
+        fps = 30.0
+    frame_dt = 1.0 / fps
+
     start = time.time()
-    for path in audio_paths:
-        if not ensure_file(path):
-            continue
-        pygame.mixer.music.load(path)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.08)
-            if time.time() - start > max_duration_sec:
-                pygame.mixer.music.stop()
-                break
-        if time.time() - start > max_duration_sec:
+    clock = pygame.time.Clock()
+
+    # default area: center-ish
+    if area is None:
+        area = pygame.Rect(80, 120, 820, 380)
+
+    while True:
+        # stop conditions
+        if time.time() - start >= duration_sec:
             break
-    pygame.mixer.quit()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                cap.release()
+                pygame.quit()
+                raise SystemExit
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                cap.release()
+                return
+
+        ok, frame = cap.read()
+        if not ok:
+            # loop video
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
+
+        # BGR -> RGB
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # resize to area
+        frame = cv2.resize(frame, (area.w, area.h), interpolation=cv2.INTER_AREA)
+
+        # numpy -> pygame surface
+        surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
+
+        # draw a dark overlay behind (optional biar clean)
+        overlay = pygame.Surface((area.w, area.h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 40))
+        screen.blit(overlay, area.topleft)
+
+        screen.blit(surf, area.topleft)
+        pygame.display.flip()
+
+        # regulate fps
+        clock.tick(fps)
+
+    cap.release()
 
 def append_log(entry: dict) -> None:
     try:
@@ -578,13 +619,16 @@ def main():
                         if narration:
                             speak_narration_tts(narration)
 
-                        audio_list = therapy.get("audio", [])
+                        video_path = therapy.get("video", "")
                         duration = int(therapy.get("duration_sec", 60))
+
+                        # mainkan video di thread biar UI ga freeze total
                         threading.Thread(
-                            target=play_audio_sequence,
-                            args=(audio_list, duration),
+                            target=play_therapy_video,
+                            args=(screen, video_path, duration, pygame.Rect(560, 185, 320, 260)),
                             daemon=True
                         ).start()
+
 
                 elif state == "WEEKLY":
                     if btn_back.hit(pos):
