@@ -602,8 +602,10 @@ def main():
                 draw_text(screen, info_msg or "No result.", 80, 130, font_mid, (255, 170, 170))
             else:
                 text = result_data["text"]
-                emo_raw = result_data["emotion_raw"]
-                emo_key = result_data["emotion_key"]
+                emotion_key = result_data.get("emotion_key", "unknown")
+                # optional: tampilkan score agregat
+                emotion_scores = result_data.get("emotion_scores", {})
+
                 therapy = result_data["therapy"]
 
                 # 2-column layout
@@ -618,8 +620,8 @@ def main():
                 # )
                 draw_text(
                     screen,
-                    f"Detected Emotion: {result_data['emotion_key'].upper()}",
-                    left_x, 120, font_small
+                    f"Detected Emotion: {emotion_key.upper()}",
+                    left_x, 120, font_small, (200,200,200)
                 )
 
                 # transcript box (left)
