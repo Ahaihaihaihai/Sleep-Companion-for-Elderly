@@ -236,6 +236,47 @@ def load_weekly_summary(days: int = 7) -> dict:
                 continue
     return {"total": total, "counts": counts}
 
+import re
+
+def split_clauses(text: str):
+    """
+    Split sentence by contrast / conjunctions.
+    Example:
+    'I was happy ... but I was sad ...'
+    """
+    parts = re.split(
+        r"\bbut\b|\bhowever\b|\balthough\b|\bthough\b|\byet\b",
+        text,
+        flags=re.IGNORECASE
+    )
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts[:4]  # batas biar ga kebanyakan
+
+def detect_emotion_per_clause(clauses):
+    from transformers import pipeline
+
+    clf = pipeline(
+        "text-classification",
+        model="j-hartmann/emotion-english-distilroberta-base",
+        top_k=None
+    )
+
+    results = []
+    for c in clauses:
+        out = clf(c)
+        if isinstance(out, list) and out and isinstance(out[0], list):
+            out = out[0]
+        out_sorted = sorted(out, key=lambda d: d["score"], reverse=True)
+        top = out_sorted[0]
+
+        results.append({
+            "clause": c,
+            "label": top["label"].lower(),
+            "score": float(top["score"]),
+        })
+
+    return results
+
 # Worker: process a wav file (runs in thread)
 def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
     try:
@@ -248,16 +289,52 @@ def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
             result_q.put({"ok": False, "error": "Empty transcript. Try speaking louder / closer mic."})
             return
 
-        emo = detect_emotion(text)
-        key, therapy = choose_therapy(emo, min_conf=0.60)
+        # --- OPTION B: clause-based emotion ---
+        clauses = split_clauses(text)
+        clause_emotions = detect_emotion_per_clause(clauses)
+
+        # aggregate scores
+        agg = {}
+        for e in clause_emotions:
+            key = normalize_emotion_label(e["label"])
+            agg.setdefault(key, []).append(e["score"])
+
+        # average score per emotion
+        avg_scores = {k: sum(v)/len(v) for k, v in agg.items()}
+        sorted_emotions = sorted(avg_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # primary & secondary emotion
+        primary_key, primary_score = sorted_emotions[0]
+        secondary_key, secondary_score = (sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0.0))
+
+        # mixed emotion rule
+        is_mixed = secondary_key and secondary_score >= 0.30
+
+        if is_mixed:
+            emotion_key = f"mixed: {primary_key}+{secondary_key}"
+            # therapy priority: sad/anxious > others
+            if "sad" in (primary_key, secondary_key):
+                chosen_key = "sad"
+            elif "anxious" in (primary_key, secondary_key):
+                chosen_key = "anxious"
+            else:
+                chosen_key = primary_key
+        else:
+            emotion_key = primary_key
+            chosen_key = primary_key
+
+        therapy = THERAPY_MAP.get(chosen_key, NEUTRAL_FALLBACK)
 
         entry = {
             "ts": time.time(),
             "text": text,
-            "emotion_raw": {"label": emo.label, "score": emo.score},
-            "emotion_key": key,
+            "clauses": clause_emotions,          # ⬅️ penting (buat UI/debug)
+            "emotion_scores": avg_scores,        # ⬅️ agregasi
+            "emotion_key": emotion_key,          # ⬅️ bisa mixed
+            "chosen_therapy": chosen_key,
             "therapy": therapy,
         }
+
         append_log(entry)
         result_q.put({"ok": True, **entry})
 
@@ -269,6 +346,7 @@ def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
             os.remove(wav_path)
         except Exception:
             pass
+
 
 # ---------------- Pygame UI ----------------
 import pygame
@@ -533,10 +611,15 @@ def main():
                 left_w = 480
                 right_x = left_x + left_w + 30
 
+                # draw_text(
+                #     screen,
+                #     f"Detected Emotion: {emo_key.upper()}  (raw={emo_raw['label']}, score={emo_raw['score']:.2f})",
+                #     left_x, 120, font_small, (200, 200, 200)
+                # )
                 draw_text(
                     screen,
-                    f"Detected Emotion: {emo_key.upper()}  (raw={emo_raw['label']}, score={emo_raw['score']:.2f})",
-                    left_x, 120, font_small, (200, 200, 200)
+                    f"Detected Emotion: {result_data['emotion_key'].upper()}",
+                    left_x, 120, font_small
                 )
 
                 # transcript box (left)
