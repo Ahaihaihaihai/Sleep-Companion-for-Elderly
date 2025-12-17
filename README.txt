@@ -7,4 +7,5 @@ requirement:
     pillow 
     pyttsx3 
     openai-whisper
+    opencv-python
 
