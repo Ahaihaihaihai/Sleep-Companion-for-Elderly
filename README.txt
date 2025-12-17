@@ -7,6 +7,4 @@ requirement:
     pygame
     openai-whisper
     python-vlc
-    pyttsx3        
-    pillow         
-    opencv-python  
+    pyttsx3
