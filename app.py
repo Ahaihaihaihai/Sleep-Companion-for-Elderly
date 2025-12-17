@@ -1,45 +1,71 @@
 from __future__ import annotations
 import os, time, json, threading, queue, tempfile, re
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
+
+# ---- VLC bootstrap (Windows) ----
+def init_vlc_windows(vlc_dir: str = r"C:\\Program Files (x86)\\VideoLAN\\VLC"):
+    """
+    Must be called BEFORE importing vlc on Windows/Python 3.8+.
+    """
+    import os
+    if os.name != "nt":
+        return True
+
+    if not os.path.isdir(vlc_dir):
+        return False
+
+    # make sure VLC dlls can be found
+    os.add_dll_directory(vlc_dir)
+
+    # also helps VLC find plugins (video/audio codecs)
+    os.environ.setdefault("VLC_PLUGIN_PATH", os.path.join(vlc_dir, "plugins"))
+    return True
+
+# Call it BEFORE importing vlc
+_VLC_OK = init_vlc_windows(r"C:\Program Files\VideoLAN\VLC")
+try:
+    import vlc  # <-- only import after DLL path is set
+except Exception:
+    vlc = None
+
 
 # ---------------- Config ----------------
-THERAPY_MAP = {
+THERAPY_MAP: Dict[str, Dict[str, Any]] = {
     "angry": {
         "title": "Calming Water Therapy",
         "description": "Designed to cool down intense emotions and slow your breathing.",
-        "video": "assets/angry_therapy.mp4",
+        "video": "assets/videos/angry_therapy.mp4",
         "narration_text": "Let's slow things down. Breathe in… and out.",
         "duration_sec": 72,
     },
     "sad": {
         "title": "Gentle Bloom Therapy",
         "description": "A soft emotional support session to help you feel less alone.",
-        "video": "assets/sad_therapy.mp4",
+        "video": "assets/videos/sad_therapy.mp4",
         "narration_text": "It's okay to feel this way. You're not alone.",
         "duration_sec": 73,
     },
     "anxious": {
         "title": "Breathing & Heartbeat Regulation",
         "description": "Helps reduce anxiety by stabilizing breath and heart rhythm.",
-        "video": "assets/anxious_therapy.mp4",
+        "video": "assets/videos/anxious_therapy.mp4",
         "narration_text": "Let's breathe slowly together. Follow the rhythm.",
         "duration_sec": 72,
     },
     "happy": {
         "title": "Positive Reinforcement Therapy",
         "description": "Keeps your positive mood grounded and relaxed.",
-        "video": "assets/happy_therapy.mp4",
+        "video": "assets/videos/happy_therapy.mp4",
         "narration_text": "Enjoy this peaceful moment.",
         "duration_sec": 73,
     },
 }
 
-NEUTRAL_FALLBACK = {
+NEUTRAL_FALLBACK: Dict[str, Any] = {
     "title": "Neutral Calm Reset",
     "description": "A simple calming session when emotion is unclear or confidence is low.",
-    "visual": "assets/images/flowing_water.png",
-    "audio": ["assets/audio/breathing.wav", "assets/audio/peaceful_ambient.wav"],
+    "video": "assets/videos/happy_therapy.mp4",
     "narration_text": "Take a slow breath. We can go step by step.",
     "duration_sec": 60,
 }
@@ -72,7 +98,7 @@ def normalize_emotion_label(label: str) -> str:
     }
     return mapping.get(label, "anxious")
 
-# ---------------- Recording: unlimited until Stop ----------------
+# ---------------- Recording (unlimited until Stop) ----------------
 class LiveRecorder:
     def __init__(self, samplerate=16000, device=None, blocksize=1024):
         self.samplerate = samplerate
@@ -94,10 +120,8 @@ class LiveRecorder:
         def callback(indata, frames, time_info, status):
             if not self.is_recording:
                 raise sd.CallbackStop()
-
             x = indata[:, 0].copy()
             self.frames.append(x)
-
             rms = float(np.sqrt(np.mean(x * x))) if len(x) else 0.0
             self.level = rms
 
@@ -117,14 +141,10 @@ class LiveRecorder:
 
         if self.stream is not None:
             self.is_recording = False
-            try:
-                self.stream.stop()
-            except Exception:
-                pass
-            try:
-                self.stream.close()
-            except Exception:
-                pass
+            try: self.stream.stop()
+            except Exception: pass
+            try: self.stream.close()
+            except Exception: pass
             self.stream = None
 
         if not self.frames:
@@ -141,7 +161,6 @@ class LiveRecorder:
         peak = float(np.max(np.abs(audio_i16)) / 32767.0) if len(audio_i16) else 0.0
         rms_final = float(np.sqrt(np.mean((audio_i16 / 32767.0) ** 2))) if len(audio_i16) else 0.0
         print(f"[DEBUG AUDIO] peak={peak:.3f} rms={rms_final:.4f} len_sec={len(audio_i16)/self.samplerate:.2f}")
-
         return tmp.name
 
 # ---------------- STT / Emotion ----------------
@@ -158,11 +177,7 @@ def split_clauses(text: str):
 
 def detect_emotion_per_clause(clauses):
     from transformers import pipeline
-    clf = pipeline(
-        "text-classification",
-        model="j-hartmann/emotion-english-distilroberta-base",
-        top_k=None
-    )
+    clf = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
     results = []
     for c in clauses:
         out = clf(c)
@@ -182,78 +197,67 @@ def speak_narration_tts(text: str) -> None:
     except Exception:
         pass
 
-
-def play_therapy_video(screen, video_path: str, duration_sec: int = 60, area: Optional[pygame.Rect] = None):
-    """
-    Play MP4 video inside pygame window using OpenCV frames.
-    Press ESC to stop early.
-    """
-    import cv2
-    import numpy as np
-    import pygame
+# ---------------- VLC video+audio playback ----------------
+def play_video_vlc(video_path: str, duration_sec: int):
     import time
 
-    if not ensure_file(video_path):
+    if vlc is None:
+        print("[VLC] ERROR: python-vlc cannot import. Check VLC install path.")
         return
+
+    if not ensure_file(video_path):
+        print(f"[VLC] Missing video: {video_path}")
+        return
+
+    player = vlc.MediaPlayer(video_path)
+    player.play()
+
+    t0 = time.time()
+    while time.time() - t0 < duration_sec:
+        time.sleep(0.05)
+
+    try:
+        player.stop()
+    except Exception:
+        pass
+
+
+# Optional thumbnail from video (first frame)
+def load_video_thumbnail_surface(video_path: str, max_size=(320, 260)):
+    """
+    Optional: requires opencv-python. If not installed or fails -> None.
+    """
+    try:
+        import cv2
+        import numpy as np
+        import pygame
+    except Exception:
+        return None
+
+    if not ensure_file(video_path):
+        return None
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 1:
-        fps = 30.0
-    frame_dt = 1.0 / fps
-
-    start = time.time()
-    clock = pygame.time.Clock()
-
-    # default area: center-ish
-    if area is None:
-        area = pygame.Rect(80, 120, 820, 380)
-
-    while True:
-        # stop conditions
-        if time.time() - start >= duration_sec:
-            break
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                cap.release()
-                pygame.quit()
-                raise SystemExit
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                cap.release()
-                return
-
-        ok, frame = cap.read()
-        if not ok:
-            # loop video
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            continue
-
-        # BGR -> RGB
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # resize to area
-        frame = cv2.resize(frame, (area.w, area.h), interpolation=cv2.INTER_AREA)
-
-        # numpy -> pygame surface
-        surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
-
-        # draw a dark overlay behind (optional biar clean)
-        overlay = pygame.Surface((area.w, area.h), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 40))
-        screen.blit(overlay, area.topleft)
-
-        screen.blit(surf, area.topleft)
-        pygame.display.flip()
-
-        # regulate fps
-        clock.tick(fps)
-
+        return None
+    ok, frame = cap.read()
     cap.release()
+    if not ok or frame is None:
+        return None
 
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    h, w = frame.shape[:2]
+
+    mw, mh = max_size
+    scale = min(mw / w, mh / h, 1.0)
+    nw, nh = int(w * scale), int(h * scale)
+
+    frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+    frame = np.transpose(frame, (1, 0, 2))
+    surf = pygame.surfarray.make_surface(frame)
+    return surf
+
+# ---------------- Logs / Weekly ----------------
 def append_log(entry: dict) -> None:
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
@@ -307,7 +311,6 @@ def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
 
         primary_key, primary_score = sorted_emotions[0]
         secondary_key, secondary_score = (sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0.0))
-
         is_mixed = secondary_key and secondary_score >= 0.30
 
         if is_mixed:
@@ -338,6 +341,7 @@ def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
 
     except Exception as e:
         result_q.put({"ok": False, "error": str(e)})
+
     finally:
         try:
             os.remove(wav_path)
@@ -395,20 +399,6 @@ class Button:
     def hit(self, pos):
         return self.rect.collidepoint(pos)
 
-def load_image_surface(path: str, max_size=(320, 260)) -> Optional[pygame.Surface]:
-    if not ensure_file(path):
-        return None
-    try:
-        img = pygame.image.load(path).convert_alpha()
-        iw, ih = img.get_size()
-        mw, mh = max_size
-        scale = min(mw / iw, mh / ih, 1.0)
-        if scale < 1.0:
-            img = pygame.transform.smoothscale(img, (int(iw * scale), int(ih * scale)))
-        return img
-    except Exception:
-        return None
-
 def load_background(path: str, size):
     if not ensure_file(path):
         return None
@@ -417,6 +407,7 @@ def load_background(path: str, size):
         return pygame.transform.smoothscale(img, size)
     except Exception:
         return None
+
 def wrap_text_lines(font, text: str, max_width: int):
     words = text.split()
     lines = []
@@ -435,40 +426,28 @@ def wrap_text_lines(font, text: str, max_width: int):
 
 def draw_lobby_panel(screen, x, y, w, h, font_big, font_mid, font_small,
                      btn_record, btn_weekly, btn_exit):
-    # panel surface (semua isi lobby digambar di sini biar gak keluar2)
     panel = pygame.Surface((w, h), pygame.SRCALPHA)
-
-    # background rounded
     pygame.draw.rect(panel, (255, 255, 255, 185), (0, 0, w, h), border_radius=22)
-    # border rounded
     pygame.draw.rect(panel, (40, 40, 40, 220), (0, 0, w, h), 2, border_radius=22)
 
     pad = 28
     max_text_w = w - pad * 2
 
-    # ---- Title wrap (biar gak kepotong) ----
     title = "Sleep Companion for Elderly"
     title_lines = wrap_text_lines(font_big, title, max_text_w)
 
     ty = 22
-    for ln in title_lines[:2]:  # max 2 baris biar gak kebanyakan
+    for ln in title_lines[:2]:
         panel.blit(font_big.render(ln, True, (25, 25, 25)), (pad, ty))
         ty += font_big.get_height() + 2
 
-    # subtitle
     subtitle = "Pick what you want to do."
     panel.blit(font_mid.render(subtitle, True, (55, 55, 55)), (pad, ty + 4))
 
-    # ---- Buttons (gambar di panel, bukan di screen) ----
-    # biar hit-test tetep bener, kita tetep pakai rect global di main
-    # tapi rendernya kita offset ke panel coords
     mx, my = pygame.mouse.get_pos()
-    # posisi global tombol -> ubah jadi lokal panel
+
     def draw_btn_on_panel(btn, label_font, theme="light"):
         hovered = btn.hit((mx, my))
-        # render tombol ke surface sementara menggunakan method Button.draw (yang butuh screen)
-        # trik: gambar ke panel dengan offset
-        # -> kita bikin wrapper: set temp rect local, gambar, balikin lagi
         old = btn.rect.copy()
         btn.rect.x = old.x - x
         btn.rect.y = old.y - y
@@ -479,13 +458,10 @@ def draw_lobby_panel(screen, x, y, w, h, font_big, font_mid, font_small,
     draw_btn_on_panel(btn_weekly, font_mid, theme="light")
     draw_btn_on_panel(btn_exit, font_mid, theme="light")
 
-    # tip
     tip = "Tip: Use headphones to avoid feedback."
     panel.blit(font_small.render(tip, True, (70, 70, 70)), (pad, h - 32))
 
-    # finally blit panel to screen
     screen.blit(panel, (x, y))
-
 
 def main():
     pygame.init()
@@ -522,7 +498,7 @@ def main():
 
     rec_start = 0.0
     result_data: Optional[dict] = None
-    therapy_img: Optional[pygame.Surface] = None
+    therapy_thumb: Optional[pygame.Surface] = None
     weekly_data: Optional[dict] = None
     info_msg = ""
 
@@ -541,7 +517,7 @@ def main():
                     if btn_record.hit(pos):
                         info_msg = ""
                         result_data = None
-                        therapy_img = None
+                        therapy_thumb = None
                         try:
                             recorder.start()
                         except Exception as e:
@@ -567,10 +543,8 @@ def main():
                         wav_path = recorder.stop_to_wav()
 
                         while not result_q.empty():
-                            try:
-                                result_q.get_nowait()
-                            except Exception:
-                                break
+                            try: result_q.get_nowait()
+                            except Exception: break
 
                         threading.Thread(
                             target=process_wav_worker,
@@ -602,7 +576,7 @@ def main():
                     if btn_retry.hit(pos):
                         info_msg = ""
                         result_data = None
-                        therapy_img = None
+                        therapy_thumb = None
                         try:
                             recorder.start()
                         except Exception as e:
@@ -622,13 +596,12 @@ def main():
                         video_path = therapy.get("video", "")
                         duration = int(therapy.get("duration_sec", 60))
 
-                        # mainkan video di thread biar UI ga freeze total
+                        # VLC will open its own window; keep pygame responsive
                         threading.Thread(
-                            target=play_therapy_video,
-                            args=(screen, video_path, duration, pygame.Rect(560, 185, 320, 260)),
+                            target=play_video_vlc,
+                            args=(video_path, duration),
                             daemon=True
                         ).start()
-
 
                 elif state == "WEEKLY":
                     if btn_back.hit(pos):
@@ -642,42 +615,34 @@ def main():
                 if not msg.get("ok"):
                     info_msg = "Error: " + msg.get("error", "Unknown error")
                     result_data = msg
-                    therapy_img = None
+                    therapy_thumb = None
                 else:
                     result_data = msg
                     therapy = msg.get("therapy", {})
-                    therapy_img = load_image_surface(therapy.get("visual", ""), max_size=(320, 260))
+                    therapy_thumb = load_video_thumbnail_surface(therapy.get("video", ""), max_size=(320, 260))
                 state = "RESULT"
                 pygame.display.set_caption("Emotion Therapy - Result")
             except queue.Empty:
                 pass
 
-        # -------- Draw background --------
-        if state in ("LOBBY", "RECORDING", "PROCESSING", "WEEKLY"):
-            if lobby_bg:
-                screen.blit(lobby_bg, (0, 0))
-            else:
-                screen.fill((235, 235, 235))
+        # -------- Background (all bright screens use lobby bg) --------
+        if lobby_bg:
+            screen.blit(lobby_bg, (0, 0))
         else:
-            screen.fill((18, 18, 22))
+            screen.fill((235, 235, 235))
 
         # -------- Draw screens --------
         if state == "LOBBY":
-            # panel lebih lebar dikit biar judul lega
             panel_x, panel_y = 55, 55
             panel_w, panel_h = 470, 450
-
             draw_lobby_panel(
-                screen,
-                panel_x, panel_y, panel_w, panel_h,
+                screen, panel_x, panel_y, panel_w, panel_h,
                 font_big, font_mid, font_small,
                 btn_record, btn_weekly, btn_exit
             )
 
-
         elif state == "RECORDING":
             draw_glass_panel(screen, pygame.Rect(55, 60, 870, 430), alpha=165)
-
             draw_text(screen, "Recording…", 90, 95, font_big, (30, 30, 30))
             elapsed = time.time() - rec_start
             draw_text(screen, f"Recording time: {elapsed:.1f}s (press Stop when done)", 90, 145, font_mid, (60, 60, 60))
@@ -688,7 +653,6 @@ def main():
             fill_w = int(bar_w * min(max(level * 2.2, 0.0), 1.0))
             pygame.draw.rect(screen, (70, 70, 70), (bar_x, bar_y, fill_w, bar_h), border_radius=10)
             pygame.draw.rect(screen, (60, 60, 60), (bar_x, bar_y, bar_w, bar_h), 2, border_radius=10)
-
             draw_text(screen, "Mic level", 90, 255, font_small, (70, 70, 70))
 
             btn_stop.draw(screen, font_mid, btn_stop.hit(pygame.mouse.get_pos()), theme="light")
@@ -696,23 +660,22 @@ def main():
 
         elif state == "PROCESSING":
             draw_glass_panel(screen, pygame.Rect(55, 60, 870, 430), alpha=165)
-
             draw_text(screen, "Processing…", 90, 95, font_big, (30, 30, 30))
             draw_text(screen, "Transcribing + detecting emotion. Please wait.", 90, 145, font_mid, (60, 60, 60))
             dots = int((time.time() * 2) % 4)
             draw_text(screen, "." * dots, 650, 145, font_mid, (60, 60, 60))
-
             btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()), theme="light")
 
         elif state == "RESULT":
-            draw_text(screen, "Result", 80, 50, font_big)
+            draw_glass_panel(screen, pygame.Rect(55, 60, 870, 430), alpha=165)
+            draw_text(screen, "Result", 80, 80, font_big, (30, 30, 30))
 
-            btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()), theme="dark")
-            btn_play.draw(screen, font_mid, btn_play.hit(pygame.mouse.get_pos()), theme="dark")
-            btn_retry.draw(screen, font_mid, btn_retry.hit(pygame.mouse.get_pos()), theme="dark")
+            btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()), theme="light")
+            btn_play.draw(screen, font_mid, btn_play.hit(pygame.mouse.get_pos()), theme="light")
+            btn_retry.draw(screen, font_mid, btn_retry.hit(pygame.mouse.get_pos()), theme="light")
 
             if not result_data or not result_data.get("ok"):
-                draw_text(screen, info_msg or "No result.", 80, 130, font_mid, (255, 170, 170))
+                draw_text(screen, info_msg or "No result.", 80, 150, font_mid, (180, 50, 50))
             else:
                 text = result_data["text"]
                 emotion_key = result_data.get("emotion_key", "unknown")
@@ -722,13 +685,12 @@ def main():
                 left_w = 480
                 right_x = left_x + left_w + 30
 
-                draw_text(screen, f"Detected Emotion: {emotion_key.upper()}", left_x, 120, font_small, (200, 200, 200))
+                draw_text(screen, f"Detected Emotion: {emotion_key.upper()}", left_x, 140, font_small, (60, 60, 60))
+                draw_text(screen, "Your recorded message:", left_x, 165, font_mid, (30, 30, 30))
 
-                draw_text(screen, "Your recorded message:", left_x, 150, font_mid)
-
-                box = pygame.Rect(left_x, 185, left_w, 110)
-                pygame.draw.rect(screen, (30, 30, 34), box, border_radius=14)
-                pygame.draw.rect(screen, (90, 90, 100), box, 2, border_radius=14)
+                box = pygame.Rect(left_x, 205, left_w, 110)
+                pygame.draw.rect(screen, (255, 255, 255), box, border_radius=14)
+                pygame.draw.rect(screen, (60, 60, 60), box, 2, border_radius=14)
 
                 words = text.split()
                 lines, line = [], ""
@@ -744,25 +706,35 @@ def main():
 
                 y = box.y + 12
                 for ln in lines[:4]:
-                    draw_text(screen, ln, box.x + 12, y, font_small)
+                    draw_text(screen, ln, box.x + 12, y, font_small, (35, 35, 35))
                     y += 24
 
-                draw_text(screen, "Selected Therapy:", left_x, 320, font_mid)
-                draw_text(screen, therapy.get("title", "Therapy"), left_x, 355, font_mid, (220, 220, 220))
-                draw_text(screen, therapy.get("description", ""), left_x, 385, font_small, (180, 180, 180))
+                draw_text(screen, "Selected Therapy:", left_x, 335, font_mid, (30, 30, 30))
+                draw_text(screen, therapy.get("title", "Therapy"), left_x, 370, font_mid, (20, 20, 20))
+                draw_text(screen, therapy.get("description", ""), left_x, 400, font_small, (55, 55, 55))
 
                 narration = therapy.get("narration_text")
                 if narration:
-                    draw_text(screen, "Therapy guidance:", left_x, 420, font_mid)
-                    draw_text(screen, f"“{narration}”", left_x, 450, font_small, (170, 170, 170))
+                    draw_text(screen, "Therapy guidance:", left_x, 430, font_mid, (30, 30, 30))
+                    draw_text(screen, f"“{narration}”", left_x, 460, font_small, (55, 55, 55))
 
-                if therapy_img:
-                    screen.blit(therapy_img, (right_x, 185))
+                # Video thumbnail preview (optional)
+                preview_box = pygame.Rect(right_x, 205, 320, 260)
+                pygame.draw.rect(screen, (255, 255, 255), preview_box, border_radius=14)
+                pygame.draw.rect(screen, (60, 60, 60), preview_box, 2, border_radius=14)
+
+                if therapy_thumb:
+                    tw, th = therapy_thumb.get_size()
+                    px = right_x + (preview_box.w - tw) // 2
+                    py = 205 + (preview_box.h - th) // 2
+                    screen.blit(therapy_thumb, (px, py))
+                else:
+                    draw_text(screen, "Video preview", right_x + 85, 325, font_small, (80, 80, 80))
 
         elif state == "WEEKLY":
             draw_glass_panel(screen, pygame.Rect(55, 60, 870, 430), alpha=165)
-            draw_text(screen, "Weekly Report (last 7 days)", 80, 90, font_big, (60, 60, 60))
-            btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()), theme="dark")
+            draw_text(screen, "Weekly Report (last 7 days)", 80, 90, font_big, (30, 30, 30))
+            btn_back.draw(screen, font_mid, btn_back.hit(pygame.mouse.get_pos()), theme="light")
 
             if not weekly_data:
                 weekly_data = load_weekly_summary(days=7)
@@ -770,14 +742,14 @@ def main():
             total = weekly_data.get("total", 0)
             counts = weekly_data.get("counts", {})
 
-            draw_text(screen, f"Total sessions: {total}", 80, 130, font_mid, (60, 60, 60))
+            draw_text(screen, f"Total sessions: {total}", 80, 150, font_mid, (40, 40, 40))
 
-            y = 190
+            y = 205
             if total == 0:
                 draw_text(screen, "No logs yet. Do a Record session first.", 80, y, font_mid, (60, 60, 60))
             else:
                 for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
-                    draw_text(screen, f"- {k}: {v}", 80, y, font_mid, (60, 60, 60))
+                    draw_text(screen, f"- {k}: {v}", 80, y, font_mid, (40, 40, 40))
                     y += 36
 
         pygame.display.flip()

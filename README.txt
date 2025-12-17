@@ -1,11 +1,12 @@
 requirement:
-    numpy 
-    sounddevice 
-    scipy 
-    transformers 
-    pygame 
-    pillow 
-    pyttsx3 
+    numpy
+    sounddevice
+    scipy
+    torch
+    transformers
+    pygame
     openai-whisper
-    opencv-python
-
+    python-vlc
+    pyttsx3        
+    pillow         
+    opencv-python  
