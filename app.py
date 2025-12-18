@@ -221,37 +221,6 @@ def play_video_vlc(video_path: str, duration_sec: int):
     except Exception:
         pass
 
-
-# ---------------- Logs / Weekly ----------------
-def append_log(entry: dict) -> None:
-    try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-def load_weekly_summary(days: int = 7) -> dict:
-    now = time.time()
-    cutoff = now - days * 86400
-    counts = {}
-    total = 0
-    if not os.path.exists(LOG_PATH):
-        return {"total": 0, "counts": {}}
-
-    with open(LOG_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                e = json.loads(line)
-                ts = float(e.get("ts", 0))
-                if ts < cutoff:
-                    continue
-                label = str(e.get("chosen_therapy", e.get("emotion_key", "unknown")))
-                counts[label] = counts.get(label, 0) + 1
-                total += 1
-            except Exception:
-                continue
-    return {"total": total, "counts": counts}
-
 def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
     try:
         if not wav_path or not os.path.exists(wav_path):
@@ -312,6 +281,38 @@ def process_wav_worker(result_q: "queue.Queue[dict]", wav_path: str):
             os.remove(wav_path)
         except Exception:
             pass
+
+# ---------------- Logs / Weekly ----------------
+def append_log(entry: dict) -> None:
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def load_weekly_summary(days: int = 7) -> dict:
+    now = time.time()
+    cutoff = now - days * 86400
+    counts = {}
+    total = 0
+    if not os.path.exists(LOG_PATH):
+        return {"total": 0, "counts": {}}
+
+    with open(LOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+                ts = float(e.get("ts", 0))
+                if ts < cutoff:
+                    continue
+                label = str(e.get("chosen_therapy", e.get("emotion_key", "unknown")))
+                counts[label] = counts.get(label, 0) + 1
+                total += 1
+            except Exception:
+                continue
+    return {"total": total, "counts": counts}
+
+
 
 # ---------------- Pygame UI ----------------
 import pygame
